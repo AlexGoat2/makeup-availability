@@ -7,6 +7,11 @@ Checks the store stock of the product in `link.txt` at de Bijenkorf **Utrecht** 
 - once a day when the first of the two stores opens (opening update)
 - once a day when the last of the two stores closes (closing update)
 
+Send **`/stock`** to the bot to get the latest stock, with the time it was checked
+and the time you asked. Running locally, the bot answers within seconds. On GitHub
+Actions it answers on the next scheduled run (up to ~15 min, longer if GitHub is
+slow, and not between 22:00 and 09:00). Only your own chat id gets answers.
+
 Opening hours come from de Bijenkorf's own data, so Sundays, koopavonden and
 holidays are handled automatically. It calls the same GraphQL query
 (`productStoreStock`) that the "Bekijk winkelvoorraad" panel on the product page uses.

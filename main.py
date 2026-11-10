@@ -7,6 +7,7 @@ watched stores with the last saved state, and send a Telegram message when:
   * the stock status of a watched store changes (e.g. out of stock -> in stock)
   * the first watched store opens for the day   (daily "opening" summary)
   * the last watched store closes for the day   (daily "closing" summary)
+  * you send /stock to the bot                 (reply with the latest stock)
 
 Opening hours come from the same API, so holidays and koopavonden are handled.
 
@@ -16,6 +17,7 @@ Usage:
     python main.py --status        # print current stock for all stores, no notify
     python main.py --get-chat-id   # show chat ids that messaged your bot
     python main.py --test-telegram # send a test message
+    python main.py --register-commands # add /stock to the bot menu
 """
 
 from __future__ import annotations
@@ -170,11 +172,11 @@ def fetch_store_stock(variant_code: str) -> dict[str, dict]:
 # --------------------------------------------------------------------------- telegram
 
 
-def telegram_api(method: str, payload: dict | None = None) -> dict:
+def telegram_api(method: str, payload: dict | None = None, http_timeout: int = 20) -> dict:
     token, _ = load_secrets()
     if not token:
         raise RuntimeError("TELEGRAM_BOT_TOKEN not set (env var or secrets.json)")
-    return post_json(f"https://api.telegram.org/bot{token}/{method}", payload or {})
+    return post_json(f"https://api.telegram.org/bot{token}/{method}", payload or {}, timeout=http_timeout)
 
 
 def send_telegram(text: str) -> bool:
@@ -273,20 +275,85 @@ def hours_text(all_stores: dict, today: date) -> str:
     return ", ".join(parts)
 
 
-def check(variant_code: str, url: str, state: dict) -> None:
-    """One check: fetch, diff against state, notify. Mutates state."""
+def poll_updates(timeout: int = 0) -> list[dict]:
+    """Fetch pending bot messages and mark them as handled on Telegram's side.
+
+    timeout > 0 long-polls: Telegram holds the request until a message arrives.
+    """
+    token, _ = load_secrets()
+    if not token:
+        return []
+    try:
+        updates = telegram_api("getUpdates", {"timeout": timeout}, http_timeout=timeout + 15).get("result", [])
+        if updates:  # confirming an offset tells Telegram to drop everything before it
+            telegram_api("getUpdates", {"offset": updates[-1]["update_id"] + 1, "timeout": 0, "limit": 1})
+        return updates
+    except (urllib.error.URLError, RuntimeError, ValueError, TimeoutError) as exc:
+        log(f"Reading Telegram messages failed: {type(exc).__name__}")
+        return []
+
+
+def stock_requests(updates: list[dict]) -> list[datetime]:
+    """Times at which the owner sent /stock (messages from other chats are ignored)."""
+    _, chat_id = load_secrets()
+    asked = []
+    for u in updates:
+        msg = u.get("message") or {}
+        text = (msg.get("text") or "").strip().lower()
+        if str((msg.get("chat") or {}).get("id")) != chat_id:
+            continue
+        if text.split("@")[0] in ("/stock", "/start", "stock", "voorraad"):
+            asked.append(datetime.fromtimestamp(msg["date"], TZ))
+    return asked
+
+
+def answer_stock_requests(asked: list[datetime], current: dict | None, checked_at: datetime | None,
+                          state: dict, url: str, error: str | None = None) -> None:
+    if not asked:
+        return
+    asked_txt = ", ".join(f"{a:%H:%M}" for a in asked) if asked[0].date() == now().date() \
+        else ", ".join(f"{a:%d-%m %H:%M}" for a in asked)
     link = f'<a href="{url}">Open product page</a>'
+    if current is not None:
+        lines = ["\U0001f4e6 <b>Current stock</b>", ""] + store_lines(current) + [
+            "", f"Checked: {checked_at:%d-%m %H:%M:%S}", f"You asked: {asked_txt}", link,
+        ]
+    else:
+        last = state.get("stores") or {}
+        changed_at = state.get("stores_changed_at", "unknown")
+        lines = [
+            "⚠️ Couldn't get the stock from de Bijenkorf just now.",
+            f"({error})" if error else "",
+            "",
+            f"<b>Last known stock</b> (unchanged since {changed_at}):",
+        ] + (store_lines(last) if last else ["none yet"]) + [
+            "", f"Tried: {now():%d-%m %H:%M:%S}", f"You asked: {asked_txt}", link,
+        ]
+    send_telegram("\n".join(lines))
+
+
+def check(variant_code: str, url: str, state: dict, updates: list[dict] | None = None) -> bool:
+    """One check: fetch, diff against state, notify, answer /stock. Mutates state.
+
+    Returns False when the stock couldn't be fetched.
+    """
+    link = f'<a href="{url}">Open product page</a>'
+    asked = stock_requests(updates or [])
     try:
         all_stores = fetch_store_stock(variant_code)
     except Exception as exc:  # network, JSON, API changes
         state["consecutive_errors"] = state.get("consecutive_errors", 0) + 1
         log(f"Check failed ({state['consecutive_errors']}x): {exc}")
+        if os.environ.get("GITHUB_ACTIONS"):  # yellow warning on the run page
+            print(f"::warning::Stock check failed: {exc}")
+        answer_stock_requests(asked, None, None, state, url, error=str(exc))
         if state["consecutive_errors"] == ERROR_ALERT_AFTER:
             send_telegram(
                 f"⚠️ Stock checker failed {ERROR_ALERT_AFTER}x in a row.\n"
                 f"Last error: {exc}"
             )
-        return
+        return False
+    checked_at = now()
 
     if state.get("consecutive_errors", 0) >= ERROR_ALERT_AFTER:
         send_telegram("✅ Stock checker is working again.")
@@ -315,7 +382,10 @@ def check(variant_code: str, url: str, state: dict) -> None:
             ["\U0001f514 <b>Store stock changed!</b>", ""]
             + store_lines(current, previous, changed) + ["", link]
         ))
+    if first_run or changed:
+        state["stores_changed_at"] = f"{checked_at:%d-%m %H:%M}"
     state["stores"] = current
+    answer_stock_requests(asked, current, checked_at, state, url)
 
     # 2) Daily opening / closing summaries
     t = now()
@@ -342,6 +412,7 @@ def check(variant_code: str, url: str, state: dict) -> None:
             ))
             daily["opening"] = True
     state["daily"] = daily
+    return True
 
 
 def main() -> int:
@@ -351,6 +422,7 @@ def main() -> int:
     parser.add_argument("--status", action="store_true", help="print stock for all stores and exit")
     parser.add_argument("--get-chat-id", action="store_true", help="list chats that messaged the bot")
     parser.add_argument("--test-telegram", action="store_true", help="send a test message")
+    parser.add_argument("--register-commands", action="store_true", help="add /stock to the bot's menu")
     args = parser.parse_args()
 
     # Windows consoles default to cp1252, which can't print the emoji in messages.
@@ -359,6 +431,12 @@ def main() -> int:
 
     if args.get_chat_id:
         print_chat_ids()
+        return 0
+    if args.register_commands:
+        telegram_api("setMyCommands", {"commands": [
+            {"command": "stock", "description": "Latest stock in Utrecht & Eindhoven"},
+        ]})
+        print("Registered /stock in the bot's command menu.")
         return 0
     if args.test_telegram:
         ok = send_telegram("✅ Test message from the Bijenkorf stock checker.")
@@ -378,13 +456,27 @@ def main() -> int:
         return 0
 
     log(f"Watching variant {variant_code} in {', '.join(WATCHED_STORES)}")
+    if args.once:
+        state = load_state()
+        check(variant_code, url, state, poll_updates())
+        save_state(state)
+        return 0  # failures show as a warning, not a red run (avoids failure emails)
+
+    # Loop mode: between checks, long-poll Telegram so /stock is answered right away.
+    updates: list[dict] = []
     while True:
         state = load_state()
-        check(variant_code, url, state)
+        check(variant_code, url, state, updates)
         save_state(state)
-        if args.once:
-            return 0
-        time.sleep(args.interval)
+        next_check = time.monotonic() + args.interval
+        updates = []
+        while (remaining := next_check - time.monotonic()) > 0:
+            if not load_secrets()[0]:
+                time.sleep(remaining)
+                break
+            updates = poll_updates(timeout=int(min(50, max(1, remaining))))
+            if stock_requests(updates):
+                break  # check right now and answer
 
 
 if __name__ == "__main__":
