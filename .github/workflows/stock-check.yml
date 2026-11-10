@@ -1,0 +1,46 @@
+name: Stock check
+
+on:
+  schedule:
+    # Times are UTC. 08:07-20:52 UTC = 09:07-21:52 Amsterdam (winter time),
+    # which covers every opening (10:00/11:00) and closing (18:00-21:00) time.
+    # Odd minutes avoid the busy top of the hour, when GitHub delays runs most.
+    - cron: "7,22,37,52 8-20 * * *"
+  workflow_dispatch: # "Run workflow" button for manual tests
+
+permissions:
+  contents: write # to commit state.json
+
+concurrency:
+  group: stock-check
+  cancel-in-progress: false
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+
+      - run: pip install -r requirements.txt
+
+      - name: Check stock
+        run: python main.py --once
+        env:
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+
+      - name: Save state
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add state.json
+          if ! git diff --cached --quiet; then
+            git commit -m "Update stock state"
+            git pull --rebase
+            git push
+          fi
