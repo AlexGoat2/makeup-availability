@@ -223,3 +223,5 @@ __marimo__/
 secrets.json
 *.log
 state.json
+
+latest_stock.json
