@@ -222,3 +222,4 @@ __marimo__/
 # Stock checker local files
 secrets.json
 *.log
+state.json

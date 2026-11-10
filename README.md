@@ -1,51 +1,53 @@
 # Bijenkorf advent calendar stock checker
 
-Checks the store stock of the product in `link.txt` at de Bijenkorf **Utrecht** and
-**Eindhoven** and sends a Telegram message:
+Watches the store stock of the product in `link.txt` at de Bijenkorf **Utrecht** and
+**Eindhoven** and messages you on Telegram:
 
 - when the stock status of either store changes (e.g. `Niet op voorraad` → `3 op voorraad`)
-- once a day when the first of the two stores opens (opening update)
-- once a day when the last of the two stores closes (closing update)
+- once a day when the first of the two stores opens, and once when the last one closes
+- when you send **`/stock`** to the bot: it replies right away with the latest check
+- if the checks stop or keep failing while the stores are open
 
-Send **`/stock`** to the bot to get the latest stock, with the time it was checked
-and the time you asked. Running locally, the bot answers within seconds. On GitHub
-Actions it answers on the next scheduled run (up to ~15 min, longer if GitHub is
-slow, and not between 22:00 and 09:00). Only your own chat id gets answers.
+## How it works
 
-Opening hours come from de Bijenkorf's own data, so Sundays, koopavonden and
-holidays are handled automatically. It calls the same GraphQL query
-(`productStoreStock`) that the "Bekijk winkelvoorraad" panel on the product page uses.
+de Bijenkorf is behind Cloudflare bot protection, which blocks scripts. So the stock
+is checked by a small Chrome extension (`extension/`). Every 15 minutes it runs the
+same request the "Bekijk winkelvoorraad" button makes, from inside a normal Bijenkorf
+tab in your own Chrome. It sends the result to `main.py` on your PC
+(`http://127.0.0.1:8765`, only reachable from your own computer). `main.py` logs each
+check to `stock.log`, keeps the latest state in `state.json`, and handles Telegram.
 
-> The site is behind Cloudflare bot protection, which sometimes answers with a
-> challenge page (HTTP 403). The script retries a few times and otherwise waits
-> for the next check. It warns you on Telegram after 6 failed checks in a row.
+If no Bijenkorf tab is open, the extension opens the product page as a pinned
+background tab. If Cloudflare shows its "Just a moment…" check, the extension reloads
+the tab once so Chrome can complete it. If Cloudflare asks you to tick a box, do that
+in the tab.
 
-## Telegram setup (one-time)
+## Setup (one-time)
 
-1. In Telegram, open **@BotFather**, send `/newbot`, and copy the bot token.
-2. Copy `secrets.example.json` to `secrets.json` and paste the token in.
-3. **Send any message to your new bot**, then run `python main.py --get-chat-id`.
-   Put the printed `chat_id` in `secrets.json`.
-4. `python main.py --test-telegram` should send a test message to your phone.
+1. **Python packages:** `pip install -r requirements.txt`
+2. **Telegram bot:**
+   1. In Telegram, message **@BotFather**, send `/newbot`, and copy the token.
+   2. Copy `secrets.example.json` to `secrets.json` and paste the token in.
+   3. Send any message to your bot, run `python main.py --get-chat-id`, and put the
+      chat id in `secrets.json`.
+   4. Run `python main.py --register-commands` to add `/stock` to the bot's menu.
+3. **Chrome extension:**
+   1. Go to `chrome://extensions` and turn on **Developer mode** (top right).
+   2. Click **Load unpacked** and choose the `extension` folder.
+   3. Pin the extension icon. Hover it to see the last result, or click it to check now.
 
-`secrets.json` is gitignored. You can use env vars `TELEGRAM_BOT_TOKEN` and
-`TELEGRAM_CHAT_ID` instead.
-
-## Running locally
+## Running
 
 ```
-pip install -r requirements.txt
-python main.py --status        # show stock + today's hours for all stores
-python main.py                 # check every 5 min (use --interval to change it)
-python main.py --once          # one check, for Task Scheduler
+python main.py          # or double-click start.bat; keep the window open
 ```
 
-## Running on GitHub Actions
+Chrome must be open for checks to happen. The extension icon badge shows the status:
+empty = OK, `!` = last check failed, `off` = main.py isn't running.
 
-`.github/workflows/stock-check.yml` runs `main.py --once` every 15 minutes from
-09:07 to 21:52 (Amsterdam winter time), and commits `state.json` back to the repo
-when it changes, so the next run knows the previous state.
+Other commands:
 
-1. Repo → Settings → Secrets and variables → Actions → add `TELEGRAM_BOT_TOKEN`
-   and `TELEGRAM_CHAT_ID`.
-2. Actions tab → "Stock check" → **Run workflow** to test it once.
+```
+python main.py --status          # print the latest check
+python main.py --test-telegram   # send a test message
+```
